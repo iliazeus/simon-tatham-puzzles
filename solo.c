@@ -4568,6 +4568,8 @@ struct game_ui {
      * the highlight cluttering your view. So it's a preference.
      */
     bool pencil_keep_highlight;
+
+    bool zero_based;
 };
 
 static game_ui *new_ui(const game_state *state)
@@ -4579,6 +4581,8 @@ static game_ui *new_ui(const game_state *state)
     ui->hshow = ui->hcursor = getenv_bool("PUZZLES_SHOW_CURSOR", false);
 
     ui->pencil_keep_highlight = false;
+
+    ui->zero_based = state ? state->blocks->max_nr_squares >= 10 : false;
 
     return ui;
 }
@@ -4634,13 +4638,24 @@ static const char *current_key_label(const game_ui *ui,
     return "";
 }
 
+#define DS_CURSOR        0x01
+#define DS_PENCIL_CURSOR 0x02
+
+#define DS_ZERO_BASED    0x04
+
+#define DS_ERROR         0x10
+#define DS_KILLER_ERROR  0x20
+
+#define DS_CURSOR_MASK (DS_CURSOR | DS_PENCIL_CURSOR)
+#define DS_ERROR_MASK (DS_ERROR | DS_KILLER_ERROR)
+
 struct game_drawstate {
     bool started, xtype;
     int cr;
     int tilesize;
     digit *grid;
     unsigned char *pencil;
-    unsigned char *hl;
+    unsigned char *flags;
     /* This is scratch space used within a single call to game_redraw. */
     int nregions, *entered_items;
 };
@@ -4717,6 +4732,8 @@ static char *interpret_move(const game_state *state, game_ui *ui,
 	    n = button - 'A' + 10;
 	if (button >= 'a' && button <= 'z')
 	    n = button - 'a' + 10;
+    if (ui->zero_based)
+        n += 1;
 	if (button == CURSOR_SELECT2 || button == '\b')
 	    n = 0;
 
@@ -4923,8 +4940,8 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
     memset(ds->grid, cr+2, cr*cr);
     ds->pencil = snewn(cr*cr*cr, digit);
     memset(ds->pencil, 0, cr*cr*cr);
-    ds->hl = snewn(cr*cr, unsigned char);
-    memset(ds->hl, 0, cr*cr);
+    ds->flags = snewn(cr*cr, unsigned char);
+    memset(ds->flags, 0, cr*cr);
     /*
      * ds->entered_items needs one row of cr entries per entity in
      * which digits may not be duplicated. That's one for each row,
@@ -4940,7 +4957,7 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
 
 static void game_free_drawstate(drawing *dr, game_drawstate *ds)
 {
-    sfree(ds->hl);
+    sfree(ds->flags);
     sfree(ds->pencil);
     sfree(ds->grid);
     sfree(ds->entered_items);
@@ -4948,16 +4965,16 @@ static void game_free_drawstate(drawing *dr, game_drawstate *ds)
 }
 
 static void draw_number(drawing *dr, game_drawstate *ds,
-                        const game_state *state, int x, int y, int hl)
+                        const game_state *state, int x, int y, int flags)
 {
     int cr = state->cr;
     int tx, ty, tw, th;
     int cx, cy, cw, ch;
-    int col_killer = (hl & 32 ? COL_ERROR : COL_KILLER);
+    int col_killer = (flags & DS_KILLER_ERROR ? COL_ERROR : COL_KILLER);
     char str[20];
 
     if (ds->grid[y*cr+x] == state->grid[y*cr+x] &&
-        ds->hl[y*cr+x] == hl &&
+        ds->flags[y*cr+x] == flags &&
         !memcmp(ds->pencil+(y*cr+x)*cr, state->pencil+(y*cr+x)*cr, cr))
 	return;			       /* no change required */
 
@@ -4981,13 +4998,15 @@ static void draw_number(drawing *dr, game_drawstate *ds,
     clip(dr, cx, cy, cw, ch);
 
     /* background needs erasing */
-    draw_rect(dr, cx, cy, cw, ch,
-	      ((hl & 15) == 1 ? COL_HIGHLIGHT :
-	       (ds->xtype && (ondiag0(y*cr+x) || ondiag1(y*cr+x))) ? COL_XDIAGONALS :
-	       COL_BACKGROUND));
+    int bg_colour = COL_BACKGROUND;
+    if ((flags & DS_CURSOR_MASK) == DS_CURSOR)
+        bg_colour = COL_HIGHLIGHT;
+    else if (ds->xtype && (ondiag0(y*cr+x) || ondiag1(y*cr+x)))
+        bg_colour = COL_XDIAGONALS;
+    draw_rect(dr, cx, cy, cw, ch, bg_colour);
 
     /* pencil-mode highlight */
-    if ((hl & 15) == 2) {
+    if ((flags & DS_CURSOR_MASK) == DS_PENCIL_CURSOR) {
         int coords[6];
         coords[0] = cx;
         coords[1] = cy;
@@ -5104,13 +5123,17 @@ static void draw_number(drawing *dr, game_drawstate *ds,
 
     /* new number needs drawing? */
     if (state->grid[y*cr+x]) {
-	str[1] = '\0';
-	str[0] = state->grid[y*cr+x] + '0';
-	if (str[0] > '9')
-	    str[0] += 'a' - ('9'+1);
+    int num = state->grid[y*cr+x];
+    if (flags & DS_ZERO_BASED) num -= 1;
+    sprint_uint_base34(str, num);
+
+    int text_colour = COL_USER;
+    if (state->immutable[y*cr+x]) text_colour = COL_CLUE;
+    else if (flags & DS_ERROR) text_colour = COL_ERROR;
+
 	draw_text(dr, tx + TILE_SIZE/2, ty + TILE_SIZE/2,
 		  FONT_VARIABLE, TILE_SIZE/2, ALIGN_VCENTRE | ALIGN_HCENTRE,
-		  state->immutable[y*cr+x] ? COL_CLUE : (hl & 16) ? COL_ERROR : COL_USER, str);
+		  text_colour, str);
     } else {
         int i, j, npencil;
 	int pl, pr, pt, pb;
@@ -5228,7 +5251,7 @@ static void draw_number(drawing *dr, game_drawstate *ds,
 
     ds->grid[y*cr+x] = state->grid[y*cr+x];
     memcpy(ds->pencil+(y*cr+x)*cr, state->pencil+(y*cr+x)*cr, cr);
-    ds->hl[y*cr+x] = hl;
+    ds->flags[y*cr+x] = flags;
 }
 
 static void game_redraw(drawing *dr, game_drawstate *ds,
@@ -5293,17 +5316,19 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
      */
     for (x = 0; x < cr; x++) {
 	for (y = 0; y < cr; y++) {
-            int highlight = 0;
+            int flags = 0;
             digit d = state->grid[y*cr+x];
 
             if (flashtime > 0 &&
                 (flashtime <= FLASH_TIME/3 ||
                  flashtime >= FLASH_TIME*2/3))
-                highlight = 1;
+                flags = DS_CURSOR;
 
             /* Highlight active input areas. */
             if (x == ui->hx && y == ui->hy && ui->hshow)
-                highlight = ui->hpencil ? 2 : 1;
+                flags = ui->hpencil ? DS_PENCIL_CURSOR : DS_CURSOR;
+
+        if (ui->zero_based) flags |= DS_ZERO_BASED;
 
 	    /* Mark obvious errors (ie, numbers which occur more than once
 	     * in a single row, column, or box). */
@@ -5318,16 +5343,16 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
 		      (state->kblocks &&
 		       ds->entered_items[(state->kblocks->whichblock[y*cr+x]
 					  +3*cr+2)*cr+d-1] > 1)))
-		highlight |= 16;
+		flags |= DS_ERROR;
 
 	    if (d && state->kblocks) {
                 if (check_killer_cage_sum(
                         state->kblocks, state->kgrid, state->grid,
                         state->kblocks->whichblock[y*cr+x]) == 0)
-                    highlight |= 32;
+                    flags |= DS_KILLER_ERROR;
 	    }
 
-	    draw_number(dr, ds, state, x, y, highlight);
+	    draw_number(dr, ds, state, x, y, flags);
 	}
     }
 
@@ -5623,8 +5648,10 @@ static void game_print(drawing *dr, const game_state *state, const game_ui *ui,
 	for (y = 0; y < cr; y++)
 	    for (x = 0; x < cr; x++)
 		if (state->kgrid[y*cr+x]) {
+            int num = state->kgrid[y*cr+x];
+            if (ui->zero_based) num -= 1;
 		    char str[20];
-		    sprintf(str, "%d", state->kgrid[y*cr+x]);
+		    sprint_uint_base34(str, num);
 		    draw_text(dr,
 			      BORDER+x*TILE_SIZE + 7*TILE_SIZE/40,
 			      BORDER+y*TILE_SIZE + 16*TILE_SIZE/40,
