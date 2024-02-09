@@ -1450,7 +1450,7 @@ static game_state *new_game(midend *me, const game_params *params,
 
 struct game_ui {
     int cx, cy;
-    bool cshow, show_black_nums;
+    bool cshow, show_black_nums, base_34, zero_based;
 };
 
 static game_ui *new_ui(const game_state *state)
@@ -1460,6 +1460,8 @@ static game_ui *new_ui(const game_state *state)
     ui->cx = ui->cy = 0;
     ui->cshow = getenv_bool("PUZZLES_SHOW_CURSOR", false);
     ui->show_black_nums = false;
+    ui->base_34 = false;
+    ui->zero_based = state ? state->o >= 10 : false;
 
     return ui;
 }
@@ -1468,15 +1470,20 @@ static config_item *get_prefs(game_ui *ui)
 {
     config_item *ret;
 
-    ret = snewn(2, config_item);
+    ret = snewn(3, config_item);
 
     ret[0].name = "Show numbers on black squares";
     ret[0].kw = "show-black-nums";
     ret[0].type = C_BOOLEAN;
     ret[0].u.boolean.bval = ui->show_black_nums;
 
-    ret[1].name = NULL;
-    ret[1].type = C_END;
+    ret[1].name = "Use both numbers and letters";
+    ret[1].kw = "numbers-and-letters";
+    ret[1].type = C_BOOLEAN;
+    ret[1].u.boolean.bval = ui->base_34;
+
+    ret[2].name = NULL;
+    ret[2].type = C_END;
 
     return ret;
 }
@@ -1484,6 +1491,7 @@ static config_item *get_prefs(game_ui *ui)
 static void set_prefs(game_ui *ui, const config_item *cfg)
 {
     ui->show_black_nums = cfg[0].u.boolean.bval;
+    ui->base_34 = cfg[1].u.boolean.bval;
 }
 
 static void free_ui(game_ui *ui)
@@ -1517,6 +1525,7 @@ static const char *current_key_label(const game_ui *ui,
 #define DS_ERROR        0x10
 #define DS_FLASH        0x20
 #define DS_IMPOSSIBLE   0x40
+#define DS_BASE34       0x80
 
 struct game_drawstate {
     int tilesize;
@@ -1717,7 +1726,10 @@ static void tile_redraw(drawing *dr, game_drawstate *ds, int x, int y,
     }
 
     if (dnum) {
-        sprintf(buf, "%d", num);
+        if (f & DS_BASE34)
+            sprint_uint_base34(buf, num);
+        else
+            sprintf(buf, "%d", num);
         if (strlen(buf) == 1)
             tsz = TEXTSZ;
         else
@@ -1757,6 +1769,7 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
 
             if (flash) f |= DS_FLASH;
             if (state->impossible) f |= DS_IMPOSSIBLE;
+            if (ui->base_34) f |= DS_BASE34;
 
             if (ui->cshow && x == ui->cx && y == ui->cy)
                 f |= DS_CURSOR;
@@ -1770,8 +1783,9 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
                 f |= DS_ERROR;
 
             if (!ds->started || ds->flags[i] != f) {
-                tile_redraw(dr, ds, COORD(x), COORD(y),
-                            state->nums[i], f);
+                int num = state->nums[i];
+                if (ui->zero_based) num -= 1;
+                tile_redraw(dr, ds, COORD(x), COORD(y), num, f);
                 ds->flags[i] = f;
             }
         }
@@ -1851,7 +1865,14 @@ static void game_print(drawing *dr, const game_state *state, const game_ui *ui,
                     draw_circle(dr, ox+TILE_SIZE/2, oy+TILE_SIZE/2, CRAD,
                                 paper, ink);
 
-                sprintf(buf, "%d", state->nums[i]);
+                int num = state->nums[i];
+                if (ui->zero_based) num -= 1;
+
+                if (ui->base_34)
+                    sprint_uint_base34(buf, num);
+                else
+                    sprintf(buf, "%d", num);
+
                 draw_text(dr, ox+TILE_SIZE/2, oy+TILE_SIZE/2, FONT_VARIABLE,
                           TEXTSZ/strlen(buf), ALIGN_VCENTRE | ALIGN_HCENTRE,
                           ink, buf);

@@ -668,4 +668,23 @@ int n_times_root_k(int n_signed, int k)
     }
 }
 
+/* this excludes I and O because of possible confusion with 0 and 1 */
+static const char BASE34_DIGITS[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+void sprint_uint_base34(char *buf, int n)
+{
+    assert(n >= 0);
+    assert(n < INT_MAX / 34);
+
+    int ndigits = 0, i;
+    for (i = 1; i <= n; i *= 34) ndigits++;
+    if (n == 0) ndigits = 1;
+
+    buf[ndigits] = '\0';
+    for (i = ndigits - 1; i >= 0; i--) {
+        buf[i] = BASE34_DIGITS[n % 34];
+        n /= 34;
+    }
+}
+
 /* vim: set shiftwidth=4 tabstop=8: */
